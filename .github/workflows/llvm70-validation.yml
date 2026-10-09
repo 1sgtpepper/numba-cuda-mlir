@@ -67,7 +67,10 @@ jobs:
           sha256sum "$RUNNER_TEMP"/wheel/*.whl
           python -m pip install --only-binary=:all: "$RUNNER_TEMP"/wheel/*.whl 'cuda-toolkit[cudart]==13.4.2'
           find "$RUNNER_TEMP/modern/bin" -type f -exec chmod +x {} +
-          ln -sf /usr/lib/llvm-18/bin/FileCheck "$RUNNER_TEMP/modern/bin/FileCheck"
+          for tool in FileCheck count not; do
+            test -x "/usr/lib/llvm-18/bin/$tool"
+            ln -sf "/usr/lib/llvm-18/bin/$tool" "$RUNNER_TEMP/modern/bin/$tool"
+          done
           test -x "$RUNNER_TEMP/modern/bin/mlir-tblgen"
           libllvm7="$RUNNER_TEMP/llvm7/lib/libLLVM-7.so"
           test -f "$libllvm7"
@@ -152,6 +155,7 @@ jobs:
           set -e
           echo "Baseline native suite exit: $native_status"
           cat "$RUNNER_TEMP/results/baseline-native.txt"
+          test -s "$RUNNER_TEMP/results/baseline-native.json"
       - name: Build and validate exact candidate
         run: |
           set -euo pipefail
@@ -186,6 +190,7 @@ jobs:
           set -e
           echo "Patched native suite exit: $native_status"
           cat "$RUNNER_TEMP/results/patched-native.txt"
+          test -s "$RUNNER_TEMP/results/patched-native.json"
           python - <<'PY'
           import json, os
           from pathlib import Path
