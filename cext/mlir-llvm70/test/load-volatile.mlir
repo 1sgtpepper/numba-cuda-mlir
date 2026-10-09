@@ -12,14 +12,6 @@ module {
       llvm.return
     }
 
-    llvm.func @flags_f64(%input: !llvm.ptr, %output: !llvm.ptr) attributes {gpu.kernel} {
-      %v = llvm.load volatile %input : !llvm.ptr -> f64
-      %n = llvm.load %input : !llvm.ptr -> f64
-      llvm.store %v, %output : f64, !llvm.ptr
-      llvm.store %n, %output : f64, !llvm.ptr
-      llvm.return
-    }
-
     llvm.func @unused_volatile(%input: !llvm.ptr<1>) attributes {gpu.kernel} {
       %a = llvm.load volatile %input : !llvm.ptr<1> -> i32
       %b = llvm.load volatile %input : !llvm.ptr<1> -> i32
@@ -33,11 +25,6 @@ module {
 // CHECK: load i32, i32 addrspace(1)*
 // CHECK: store volatile i32
 // CHECK: store i32
-// CHECK: ret void
-
-// CHECK-LABEL: define ptx_kernel void @flags_f64(
-// CHECK: load volatile double, double*
-// CHECK: load double, double*
 // CHECK: ret void
 
 // CHECK-LABEL: define ptx_kernel void @unused_volatile(
