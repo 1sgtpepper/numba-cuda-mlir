@@ -38,7 +38,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$PATCH_SHA"
           sudo apt-get update
           sudo apt-get install -y llvm-18-tools ninja-build
-          python -m pip install lit==23.1.3 nvidia-cuda-nvcc-cu12==12.9.86 pre-commit 'pytest>=8,<9' filecheck ml-dtypes cffi
+          python -m pip install lit==23.1.3 nvidia-cuda-nvcc-cu12==12.9.86 nvidia-cuda-nvrtc-cu12==12.9.86 pre-commit 'pytest>=8,<9' filecheck ml-dtypes cffi
           echo /usr/lib/llvm-18/bin >> "$GITHUB_PATH"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
@@ -81,6 +81,21 @@ jobs:
           command -v FileCheck
           lit --version
           sha256sum "$libllvm7" "$nvvm" "$pythoncapi"
+      - name: Verify CPU translation dependencies
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from numba_cuda_mlir.mlir_optimization import _get_libnvvm_path, _get_nvvm_ir_version
+          from numba_cuda_mlir.numba_cuda.cudadrv.libs import get_libdevice
+          nvvm = Path(_get_libnvvm_path().decode()).resolve()
+          assert nvvm == Path(os.environ["LLVM70_LIBNVVM"]).resolve(), nvvm
+          libdevice = Path(get_libdevice())
+          assert libdevice.is_file(), libdevice
+          print("Resolved NVVM:", nvvm)
+          print("Resolved libdevice:", libdevice)
+          print("NVVM IR/debug version:", _get_nvvm_ir_version())
+          PY
       - name: Prove regression on old owner
         run: |
           set -euo pipefail
