@@ -22,6 +22,11 @@ jobs:
           ref: ${{ inputs.patch_sha }}
           persist-credentials: false
           fetch-depth: 2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.ref }}
+          path: validation
+          persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
         with:
           python-version: '3.12'
@@ -48,9 +53,18 @@ jobs:
           artifact-ids: 11624920409
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/llvm7
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          repository: NVIDIA/numba-cuda-mlir
+          run-id: 37946828566
+          artifact-ids: 11624362575
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/wheel
       - name: Configure dependencies
         run: |
           set -euo pipefail
+          sha256sum "$RUNNER_TEMP"/wheel/*.whl
+          python -m pip install --only-binary=:all: "$RUNNER_TEMP"/wheel/*.whl 'cuda-toolkit[cudart]==13.4.2'
           find "$RUNNER_TEMP/modern/bin" -type f -exec chmod +x {} +
           ln -sf /usr/lib/llvm-18/bin/FileCheck "$RUNNER_TEMP/modern/bin/FileCheck"
           test -x "$RUNNER_TEMP/modern/bin/mlir-tblgen"
@@ -59,10 +73,13 @@ jobs:
           echo "LIBLLVM7=$libllvm7" >> "$GITHUB_ENV"
           nvvm=$(python -c 'import site; from pathlib import Path; print(next(p for r in site.getsitepackages() if (p := Path(r)/"nvidia/cuda_nvcc/nvvm/lib64/libnvvm.so").is_file()))')
           echo "LLVM70_LIBNVVM=$nvvm" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/modern/lib:$RUNNER_TEMP/llvm7/lib:$(dirname "$nvvm")" >> "$GITHUB_ENV"
+          pythoncapi=$(python -c 'import numba_cuda_mlir; from pathlib import Path; print(Path(numba_cuda_mlir.__file__).parent/"_mlir/_mlir_libs/libMLIRPythonCAPI.so")')
+          test -f "$pythoncapi"
+          echo "LLVM70_PYTHON_CAPI=$pythoncapi" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/modern/lib:$RUNNER_TEMP/llvm7/lib:$(dirname "$nvvm"):$(dirname "$pythoncapi")" >> "$GITHUB_ENV"
           command -v FileCheck
           lit --version
-          sha256sum "$libllvm7" "$nvvm"
+          sha256sum "$libllvm7" "$nvvm" "$pythoncapi"
       - name: Prove regression on old owner
         run: |
           set -euo pipefail
@@ -74,35 +91,62 @@ jobs:
           cmake -S cext/mlir-llvm70 -B "$RUNNER_TEMP/build" -G Ninja \
             -DMLIR_DIR="$RUNNER_TEMP/modern/lib/cmake/mlir" \
             -DLLVM_DIR="$RUNNER_TEMP/modern/lib/cmake/llvm" \
+            -DLLVM70_MLIR_PYTHON_CAPI="$LLVM70_PYTHON_CAPI" \
             -DLLVM_EXTERNAL_LIT="$(command -v lit)" \
             -DCMAKE_CXX_STANDARD=17 -DCMAKE_BUILD_TYPE=Release
-          cmake --build "$RUNNER_TEMP/build" --target llvm70-translate --parallel 2
-          "$RUNNER_TEMP/build/tools/llvm70-translate" cext/mlir-llvm70/test/load-volatile.mlir --dump-llvm \
-            > /dev/null 2> "$RUNNER_TEMP/results/baseline.ll"
-          grep -Fq 'load i32, i32 addrspace(1)*' "$RUNNER_TEMP/results/baseline.ll"
-          grep -Fq 'store volatile i32' "$RUNNER_TEMP/results/baseline.ll"
-          ! grep -Fq 'load volatile' "$RUNNER_TEMP/results/baseline.ll"
+          cmake --build "$RUNNER_TEMP/build" --target MLIRToLLVM70 llvm70-translate --parallel 2
+          python validation/validation/llvm70-native-check.py \
+            "$RUNNER_TEMP/build/lib/libMLIRToLLVM70.so" cext/mlir-llvm70/test/load-volatile.mlir \
+            "$RUNNER_TEMP/results/baseline" --baseline
           if FileCheck cext/mlir-llvm70/test/load-volatile.mlir < "$RUNNER_TEMP/results/baseline.ll" \
               2> "$RUNNER_TEMP/results/baseline-check.txt"; then
             exit 1
           fi
           grep -q 'expected string not found' "$RUNNER_TEMP/results/baseline-check.txt"
           cat "$RUNNER_TEMP/results/baseline-check.txt"
+          set +e
+          lit -v "$RUNNER_TEMP/build/test" --output="$RUNNER_TEMP/results/baseline-native.json" \
+            > "$RUNNER_TEMP/results/baseline-native.txt" 2>&1
+          native_status=$?
+          set -e
+          echo "Baseline native suite exit: $native_status"
+          cat "$RUNNER_TEMP/results/baseline-native.txt"
       - name: Build and validate exact candidate
         run: |
           set -euo pipefail
           cp "$RUNNER_TEMP/patched-owner.cpp" cext/mlir-llvm70/lib/LLVM70Target.cpp
           git diff --exit-code
           sha256sum cext/mlir-llvm70/lib/LLVM70Target.cpp
-          cmake --build "$RUNNER_TEMP/build" --target llvm70-translate --parallel 2
-          "$RUNNER_TEMP/build/tools/llvm70-translate" cext/mlir-llvm70/test/load-volatile.mlir --dump-llvm \
-            > /dev/null 2> "$RUNNER_TEMP/results/patched.ll"
+          cmake --build "$RUNNER_TEMP/build" --target MLIRToLLVM70 llvm70-translate --parallel 2
+          python validation/validation/llvm70-native-check.py \
+            "$RUNNER_TEMP/build/lib/libMLIRToLLVM70.so" cext/mlir-llvm70/test/load-volatile.mlir \
+            "$RUNNER_TEMP/results/patched"
           FileCheck cext/mlir-llvm70/test/load-volatile.mlir < "$RUNNER_TEMP/results/patched.ll"
-          "$RUNNER_TEMP/build/tools/llvm70-translate" cext/mlir-llvm70/test/load-volatile.mlir --dump-ptx \
-            > /dev/null 2> "$RUNNER_TEMP/results/patched.ptx"
           cat "$RUNNER_TEMP/results/patched.ptx"
           lit -v --filter load-volatile "$RUNNER_TEMP/build/test" | tee "$RUNNER_TEMP/results/focused.txt"
-          lit -v "$RUNNER_TEMP/build/test" | tee "$RUNNER_TEMP/results/native-suite.txt"
+          set +e
+          lit -v "$RUNNER_TEMP/build/test" --output="$RUNNER_TEMP/results/patched-native.json" \
+            > "$RUNNER_TEMP/results/patched-native.txt" 2>&1
+          native_status=$?
+          set -e
+          echo "Patched native suite exit: $native_status"
+          cat "$RUNNER_TEMP/results/patched-native.txt"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          results = Path(os.environ["RUNNER_TEMP"]) / "results"
+          def failures(name):
+              data = json.loads((results / name).read_text())
+              return {t["name"]: t["code"] for t in data["tests"] if t["code"] not in ("PASS", "UNSUPPORTED")}
+          baseline = failures("baseline-native.json")
+          patched = failures("patched-native.json")
+          regression = [n for n in baseline if n.endswith("load-volatile.mlir")]
+          assert len(regression) == 1, baseline
+          del baseline[regression[0]]
+          assert patched == baseline, (baseline, patched)
+          print("Existing native failures unchanged:", json.dumps(patched, sort_keys=True))
+          print("New volatile regression changed from FAIL to PASS.")
+          PY
       - name: Check repository conventions
         run: pre-commit run --files cext/mlir-llvm70/lib/LLVM70Target.cpp cext/mlir-llvm70/test/load-volatile.mlir
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
