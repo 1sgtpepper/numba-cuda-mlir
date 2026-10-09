@@ -16,7 +16,6 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       PATCH_SHA: ${{ inputs.patch_sha }}
-      LIBLLVM7: ${{ runner.temp }}/llvm7/lib/libLLVM-7.so
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -55,13 +54,15 @@ jobs:
           find "$RUNNER_TEMP/modern/bin" -type f -exec chmod +x {} +
           ln -sf /usr/lib/llvm-18/bin/FileCheck "$RUNNER_TEMP/modern/bin/FileCheck"
           test -x "$RUNNER_TEMP/modern/bin/mlir-tblgen"
-          test -f "$LIBLLVM7"
+          libllvm7="$RUNNER_TEMP/llvm7/lib/libLLVM-7.so"
+          test -f "$libllvm7"
+          echo "LIBLLVM7=$libllvm7" >> "$GITHUB_ENV"
           nvvm=$(python -c 'import site; from pathlib import Path; print(next(p for r in site.getsitepackages() if (p := Path(r)/"nvidia/cuda_nvcc/nvvm/lib64/libnvvm.so").is_file()))')
           echo "LLVM70_LIBNVVM=$nvvm" >> "$GITHUB_ENV"
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/modern/lib:$RUNNER_TEMP/llvm7/lib:$(dirname "$nvvm")" >> "$GITHUB_ENV"
           command -v FileCheck
           lit --version
-          sha256sum "$LIBLLVM7" "$nvvm"
+          sha256sum "$libllvm7" "$nvvm"
       - name: Prove regression on old owner
         run: |
           set -euo pipefail
