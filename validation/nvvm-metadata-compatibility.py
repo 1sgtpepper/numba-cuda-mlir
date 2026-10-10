@@ -63,7 +63,10 @@ for role, values in (("default", [2, 0, 0, 0]), ("reported", reported)):
         elif role == "reported":
             raise RuntimeError(f"runtime tuple failed: status={status}, log={message}")
         else:
-            assert status == 3 and "DBG version 0.0 incompatible" in message
+            assert status == 3 and (
+                "DBG version 0.0 incompatible" in message
+                or "debug metadata version 0.0 incompatible" in message
+            )
     finally:
         assert destroy(c.byref(program)) == 0
 report = {
