@@ -137,6 +137,9 @@ jobs:
           cat "$RUNNER_TEMP/results/baseline-check.txt"
           cp "$RUNNER_TEMP/build/lib/libMLIRToLLVM70.so" "$(dirname "$LLVM70_PYTHON_CAPI")/libMLIRToLLVM70.so"
           sha256sum "$(dirname "$LLVM70_PYTHON_CAPI")/libMLIRToLLVM70.so"
+          (cd "$RUNNER_TEMP" && python "$GITHUB_WORKSPACE/validation/validation/llvm70-load-matrix.py" \
+            "$RUNNER_TEMP/results/baseline-matrix" --baseline) \
+            | tee "$RUNNER_TEMP/results/baseline-matrix.txt"
           set +e
           (cd "$RUNNER_TEMP" && python -m pytest -q \
             --junitxml="$RUNNER_TEMP/results/baseline-pytest.xml" \
@@ -165,6 +168,9 @@ jobs:
           echo "Baseline native suite exit: $native_status"
           cat "$RUNNER_TEMP/results/baseline-native.txt"
           test -s "$RUNNER_TEMP/results/baseline-native.json"
+          python validation/validation/llvm70-cli-diagnostics.py \
+            "$RUNNER_TEMP/build/tools/llvm70-translate" cext/mlir-llvm70/test \
+            "$RUNNER_TEMP/results/baseline-cli"
       - name: Build and validate exact candidate
         run: |
           set -euo pipefail
@@ -180,6 +186,9 @@ jobs:
           cp "$RUNNER_TEMP/build/lib/libMLIRToLLVM70.so" "$(dirname "$LLVM70_PYTHON_CAPI")/libMLIRToLLVM70.so"
           cmp "$RUNNER_TEMP/build/lib/libMLIRToLLVM70.so" "$(dirname "$LLVM70_PYTHON_CAPI")/libMLIRToLLVM70.so"
           sha256sum "$(dirname "$LLVM70_PYTHON_CAPI")/libMLIRToLLVM70.so"
+          (cd "$RUNNER_TEMP" && python "$GITHUB_WORKSPACE/validation/validation/llvm70-load-matrix.py" \
+            "$RUNNER_TEMP/results/patched-matrix") \
+            | tee "$RUNNER_TEMP/results/patched-matrix.txt"
           (cd "$RUNNER_TEMP" && python -m pytest -q \
             --junitxml="$RUNNER_TEMP/results/patched-pytest.xml" "$RUNNER_TEMP/mlir-tests") \
             | tee "$RUNNER_TEMP/results/patched-pytest.txt"
@@ -222,6 +231,9 @@ jobs:
           echo "Patched native suite exit: $native_status"
           cat "$RUNNER_TEMP/results/patched-native.txt"
           test -s "$RUNNER_TEMP/results/patched-native.json"
+          python validation/validation/llvm70-cli-diagnostics.py \
+            "$RUNNER_TEMP/build/tools/llvm70-translate" cext/mlir-llvm70/test \
+            "$RUNNER_TEMP/results/patched-cli"
           python - <<'PY'
           import json, os
           from pathlib import Path
@@ -234,6 +246,14 @@ jobs:
           assert patched == baseline, (baseline, patched)
           print("Existing native failures unchanged:", json.dumps(patched, sort_keys=True))
           print("Existing native suite compared; new real-CAPI pytest verified separately.")
+          old_cli = json.loads((results/"baseline-cli/inventory.json").read_text())
+          new_cli = json.loads((results/"patched-cli/inventory.json").read_text())
+          assert old_cli == new_cli
+          old_ir = (results/"baseline-matrix/raw-ir.ll").read_text()
+          new_ir = (results/"patched-matrix/raw-ir.ll").read_text()
+          assert old_ir == new_ir.replace("load volatile ", "load ")
+          print("Raw IR differential differs only at72 volatile load markers")
+          print("Unpiped CLI diagnostic inventories identical:", len(new_cli))
           PY
       - name: Check repository conventions
         run: pre-commit run --files cext/mlir-llvm70/lib/LLVM70Target.cpp tests/mlir/test_llvm70_translation.py
