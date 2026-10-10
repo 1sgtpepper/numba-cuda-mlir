@@ -11,13 +11,13 @@ on:
         required: true
         default: native
         type: choice
-        options: [native, wheel]
+        options: [native, wheel, compatibility]
 permissions:
   contents: read
   actions: read
 jobs:
   native:
-    if: ${{ inputs.validation_kind != 'wheel' }}
+    if: ${{ inputs.validation_kind == 'native' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -385,3 +385,74 @@ jobs:
             wheel-results/
             dist/*.whl
           retention-days: 7
+
+  compatibility:
+    if: ${{ inputs.validation_kind == 'compatibility' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {toolkit: '12.2.2', component: cuda_nvcc, version: '12.2.140', digest: '3feaab191e1ae3fded02c02b0f24453069ada96b2e3a750251293b36079dc2f1'}
+          - {toolkit: '12.9.1', component: cuda_nvcc, version: '12.9.86', digest: '7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35'}
+          - {toolkit: '13.0.2', component: libnvvm, version: '13.0.88', digest: '17ef1665b63670887eeba7d908da5669fa8c66bb73b5b4c1367f49929c086353'}
+          - {toolkit: '13.4.1', component: libnvvm, version: '13.4.59', digest: '8966b24692ef664b77a3d3411a0c82b4960a2d6a179e0281dac0752c5c1518c7'}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          repository: 1sgtpepper/numba-cuda-mlir
+          run-id: 38012054489
+          artifact-ids: 11654660387
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/native-results
+      - name: Pin actual NVVM input and query both metadata roles
+        env:
+          TOOLKIT: ${{ matrix.toolkit }}
+          COMPONENT: ${{ matrix.component }}
+          COMPONENT_VERSION: ${{ matrix.version }}
+          EXPECTED_DIGEST: ${{ matrix.digest }}
+        run: |
+          set -euo pipefail
+          mkdir -p compatibility-results
+          git rev-parse HEAD > compatibility-results/validation-commit.txt
+          printf '%s  %s\n' c6577ca8f371935ed55576bb76b7a04347d4e09816cbb8bc380597223a1de0a1 \
+            "$RUNNER_TEMP/native-results/baseline.ll" | sha256sum --check
+          curl --fail --location --retry 2 \
+            "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_$TOOLKIT.json" \
+            -o compatibility-results/manifest.json
+          python - <<'PYCODE'
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads(Path('compatibility-results/manifest.json').read_text())
+          component = manifest[os.environ['COMPONENT']]
+          assert component['version'] == os.environ['COMPONENT_VERSION']
+          archive = component['linux-x86_64']
+          assert archive['sha256'] == os.environ['EXPECTED_DIGEST']
+          Path('compatibility-results/archive.json').write_text(json.dumps(archive, indent=2) + '\n')
+          Path('compatibility-results/archive-path.txt').write_text(archive['relative_path'])
+          PYCODE
+          curl --fail --location --retry 2 \
+            "https://developer.download.nvidia.com/compute/cuda/redist/$(cat compatibility-results/archive-path.txt)" \
+            -o "$RUNNER_TEMP/nvvm.tar.xz"
+          printf '%s  %s\n' "$EXPECTED_DIGEST" "$RUNNER_TEMP/nvvm.tar.xz" | sha256sum --check
+          mkdir "$RUNNER_TEMP/nvvm"
+          tar -xJf "$RUNNER_TEMP/nvvm.tar.xz" -C "$RUNNER_TEMP/nvvm"
+          nvvm=$(find "$RUNNER_TEMP/nvvm" -type f -name 'libnvvm.so*')
+          test -n "$nvvm"
+          test -f "$nvvm"
+          python validation/nvvm-metadata-compatibility.py "$nvvm" \
+            "$RUNNER_TEMP/native-results/baseline.ll" compatibility-results/probe
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: nvvm-metadata-${{ matrix.toolkit }}
+          path: compatibility-results/
