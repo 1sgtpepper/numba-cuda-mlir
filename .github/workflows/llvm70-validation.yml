@@ -66,6 +66,14 @@ jobs:
           set -euo pipefail
           sha256sum "$RUNNER_TEMP"/wheel/*.whl
           python -m pip install --only-binary=:all: "$RUNNER_TEMP"/wheel/*.whl 'cuda-toolkit[cudart]==13.4.2'
+          python - <<'PY'
+          import shutil
+          from pathlib import Path
+          import numba_cuda_mlir
+          destination = Path(numba_cuda_mlir.__file__).parent
+          shutil.copytree(Path("src/numba_cuda_mlir"), destination, dirs_exist_ok=True)
+          print("Exact candidate Python sources installed:", destination)
+          PY
           find "$RUNNER_TEMP/modern/bin" -type f -exec chmod +x {} +
           for tool in FileCheck count not; do
             test -x "/usr/lib/llvm-18/bin/$tool"
@@ -105,9 +113,10 @@ jobs:
           mkdir -p "$RUNNER_TEMP/results"
           mkdir -p "$RUNNER_TEMP/mlir-tests"
           cp tests/mlir/test_*.py "$RUNNER_TEMP/mlir-tests/"
+          cp tests/gpu_utils.py "$RUNNER_TEMP/mlir-tests/"
           sha256sum "$RUNNER_TEMP/mlir-tests/test_llvm70_translation.py"
           cp cext/mlir-llvm70/lib/LLVM70Target.cpp "$RUNNER_TEMP/patched-owner.cpp"
-          gh api repos/NVIDIA/numba-cuda-mlir/contents/cext/mlir-llvm70/lib/LLVM70Target.cpp?ref=d11fbd636362e1a72f76438a76fdce6ba803f032 \
+          gh api repos/NVIDIA/numba-cuda-mlir/contents/cext/mlir-llvm70/lib/LLVM70Target.cpp?ref=4f721aa03d82c39352bb9327e34146e61e864c62 \
             --jq .content | base64 -d > cext/mlir-llvm70/lib/LLVM70Target.cpp
           sha256sum cext/mlir-llvm70/lib/LLVM70Target.cpp
           cmake -S cext/mlir-llvm70 -B "$RUNNER_TEMP/build" -G Ninja \
@@ -183,6 +192,28 @@ jobs:
           assert any(c.get("name") == "test_llvm70_translation_preserves_volatile_loads" for c in cases)
           print("PATCHED_MLIR_CASES_PASSED=", len(cases), "; SKIPPED=0")
           PY
+          (cd "$RUNNER_TEMP" && python - <<'PY'
+          import importlib.util, os, sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          from unittest.mock import patch
+          import pytest
+          import numba_cuda_mlir.tools
+          root = Path(os.environ["RUNNER_TEMP"])
+          spec = importlib.util.spec_from_file_location("gpu_utils", root/"mlir-tests/gpu_utils.py")
+          helper = importlib.util.module_from_spec(spec)
+          with patch("platform.system", return_value="Windows"), patch("platform.machine", return_value="ARM64"):
+              spec.loader.exec_module(helper)
+          sys.modules["gpu_utils"] = helper
+          output = root/"results/windows-arm64-marker.xml"
+          status = pytest.main(["-q", f"--junitxml={output}", str(root/"mlir-tests/test_llvm70_translation.py")])
+          assert status == 0
+          cases = ET.parse(output).getroot().findall(".//testcase")
+          assert len(cases) == 1
+          skipped = cases[0].find("skipped")
+          assert skipped is not None and skipped.get("message") == "NYI: LLVM70 Bridge on Windows ARM64"
+          print("UNSUPPORTED_PLATFORM_MARKER_BRANCH=PASS; synthetic platform selection only")
+          PY
+          )
           set +e
           lit -v "$RUNNER_TEMP/build/test" --output="$RUNNER_TEMP/results/patched-native.json" \
             > "$RUNNER_TEMP/results/patched-native.txt" 2>&1
