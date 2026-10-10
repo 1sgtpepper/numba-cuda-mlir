@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from gpu_utils import requires_llvm70
 from numba_cuda_mlir import tools
 from numba_cuda_mlir._mlir import ir
 from numba_cuda_mlir.mlir_optimization import _call_llvm70_capi
 
 
+@requires_llvm70
 def test_llvm70_translation_preserves_volatile_loads(monkeypatch):
     # Supply the target without requiring a CUDA device for an IR-only test.
     monkeypatch.setattr(tools, "get_gpu_compute_capability", lambda: "sm_90")
