@@ -6,11 +6,18 @@ on:
         description: Exact candidate source commit
         required: true
         type: string
+      validation_kind:
+        description: Native matrix or isolated installed wheel
+        required: true
+        default: native
+        type: choice
+        options: [native, wheel]
 permissions:
   contents: read
   actions: read
 jobs:
   native:
+    if: ${{ inputs.validation_kind != 'wheel' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
@@ -262,3 +269,119 @@ jobs:
         with:
           name: native-load-results
           path: ${{ runner.temp }}/results
+  wheel:
+    if: ${{ inputs.validation_kind == 'wheel' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.patch_sha }}
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.ref }}
+          path: validation
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Verify exact source
+        env:
+          SOURCE_SHA: ${{ inputs.patch_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          mkdir -p wheel-results
+          git rev-parse HEAD > wheel-results/source.txt
+          sha256sum cext/mlir-llvm70/lib/LLVM70Target.cpp tests/mlir/test_llvm70_translation.py \
+            > wheel-results/source.sha256
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          repository: NVIDIA/numba-cuda-mlir
+          run-id: 37946828566
+          artifact-ids: 11624341691
+          github-token: ${{ github.token }}
+          path: llvm-modern-install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          repository: NVIDIA/numba-cuda-mlir
+          run-id: 37946828566
+          artifact-ids: 11624920409
+          github-token: ${{ github.token }}
+          path: llvm7-install
+      - name: Prepare pinned dependency inputs and container
+        run: |
+          set -euo pipefail
+          chmod -R +x llvm-modern-install/bin llvm7-install/bin
+          test -f llvm-modern-install/python_packages/numba_cuda_mlir_mlir/numba_cuda_mlir/_mlir/_mlir_libs/libMLIRPythonCAPI.so
+          test -f llvm7-install/lib/libLLVM-7.so
+          sha256sum llvm7-install/lib/libLLVM-7.so \
+            llvm-modern-install/python_packages/numba_cuda_mlir_mlir/numba_cuda_mlir/_mlir/_mlir_libs/libMLIRPythonCAPI.so \
+            > wheel-results/dependencies.sha256
+          docker pull quay.io/pypa/manylinux_2_28_x86_64
+          image=$(docker image inspect --format '{{index .RepoDigests 0}}' quay.io/pypa/manylinux_2_28_x86_64)
+          [[ "$image" == quay.io/pypa/manylinux_2_28_x86_64@sha256:* ]]
+          printf '%s\n' "$image" > wheel-results/container.txt
+          echo "MANYLINUX_IMAGE=$image" >> "$GITHUB_ENV"
+      - name: Build one exact-source repaired wheel
+        uses: pypa/cibuildwheel@294735312765b09d24a2fbec22660ce817587d55
+        with:
+          package-dir: .
+          output-dir: dist
+        env:
+          CIBW_BUILD: cp312-manylinux_x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: ${{ env.MANYLINUX_IMAGE }}
+          CIBW_ENVIRONMENT_LINUX: >
+            MLIR_DIR=/host/${{ github.workspace }}/llvm-modern-install/lib/cmake/mlir
+            LIBLLVM7=/host/${{ github.workspace }}/llvm7-install/lib/libLLVM-7.so
+          CIBW_REPAIR_WHEEL_COMMAND_LINUX: >
+            auditwheel -v repair {wheel} --wheel-dir {dest_dir}
+            --exclude libMLIRPythonCAPI.so
+            --exclude libMLIRPythonSupport-numba_cuda_mlir.so
+            --exclude libLLVM-7.so
+      - name: Inspect wheel payload and test isolated installation
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=(dist/*.whl)
+          test "${#wheels[@]}" -eq 1
+          wheel=${wheels[0]}
+          sha256sum "$wheel" > wheel-results/wheel.sha256
+          python - "$wheel" <<'PY'
+          import hashlib, json, sys
+          from pathlib import Path
+          from zipfile import ZipFile
+          required = {
+              "numba_cuda_mlir/_mlir/_mlir_libs/libMLIRToLLVM70.so",
+              "numba_cuda_mlir/_mlir/_mlir_libs/libMLIRPythonCAPI.so",
+              "numba_cuda_mlir/lib/libLLVM-7.so",
+          }
+          with ZipFile(sys.argv[1]) as archive:
+              names = set(archive.namelist())
+              assert required <= names, sorted(required - names)
+              metadata = next(n for n in names if n.endswith(".dist-info/WHEEL"))
+              tags = [l for l in archive.read(metadata).decode().splitlines() if l.startswith("Tag: ")]
+              assert any("cp312" in t and "manylinux" in t and "x86_64" in t for t in tags), tags
+              hashes = {n: hashlib.sha256(archive.read(n)).hexdigest() for n in sorted(required)}
+              Path("wheel-results/payload.json").write_text(json.dumps({"tags": tags, "sha256": hashes}, indent=2))
+          PY
+          mkdir -p "$RUNNER_TEMP/wheel-test-input"
+          cp tests/mlir/test_*.py tests/gpu_utils.py "$RUNNER_TEMP/wheel-test-input/"
+          cp validation/validation/llvm70-wheel-smoke.sh "$RUNNER_TEMP/wheel-test-input/"
+          cp wheel-results/payload.json "$RUNNER_TEMP/wheel-test-input/"
+          docker run --rm \
+            -e WHEEL_NAME="$(basename "$wheel")" \
+            -v "$GITHUB_WORKSPACE/dist:/wheel:ro" \
+            -v "$RUNNER_TEMP/wheel-test-input:/inputs:ro" \
+            -v "$GITHUB_WORKSPACE/wheel-results:/results" \
+            "$MANYLINUX_IMAGE" bash /inputs/llvm70-wheel-smoke.sh
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: installed-wheel-results
+          path: |
+            wheel-results/
+            dist/*.whl
+          retention-days: 7
