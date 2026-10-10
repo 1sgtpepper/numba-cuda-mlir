@@ -37,3 +37,5 @@ def test_llvm70_translation_preserves_volatile_loads(monkeypatch):
     assert llvm_ir.count("load i32, i32 addrspace(1)*") == 1
     assert llvm_ir.count("store volatile i32") == 1
     assert llvm_ir.count("store i32") == 1
+    loads = [line for line in llvm_ir.splitlines() if " = load " in line]
+    assert ["load volatile" in line for line in loads] == [True, True, True, False]
