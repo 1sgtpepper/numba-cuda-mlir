@@ -314,7 +314,7 @@ jobs:
       - name: Prepare pinned dependency inputs and container
         run: |
           set -euo pipefail
-          chmod -R +x llvm-modern-install/bin llvm7-install/bin
+          chmod -R +x llvm-modern-install/bin
           test -f llvm-modern-install/python_packages/numba_cuda_mlir_mlir/numba_cuda_mlir/_mlir/_mlir_libs/libMLIRPythonCAPI.so
           test -f llvm7-install/lib/libLLVM-7.so
           sha256sum llvm7-install/lib/libLLVM-7.so \
